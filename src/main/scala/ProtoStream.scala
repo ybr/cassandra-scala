@@ -15,7 +15,7 @@ import scala.concurrent.duration._
 
 import cassandra.protocol._
 import cassandra.Encoders._
-import cassandra.Decoders._
+import cassandra.decoder._
 
 object ProtoStream {
   def main(args: Array[String]) {
@@ -24,9 +24,11 @@ object ProtoStream {
     val conn = new Connection(new InetSocketAddress("192.168.99.100", 32769))
     val r = for {
       keyspace <- conn.connect("proto")
-      _ = println("keyspace = " + keyspace)
-      result <- conn.stream("SELECT data FROM test LIMIT 10", One)
+      _ = println("------------------------- START = " + System.currentTimeMillis)
+      result <- conn.stream("SELECT data FROM test LIMIT 1500", One)
+      // _ <- conn.stream("SELECT data FROM test LIMIT 10", One)
     } yield {
+      println("------------------------- END = " + System.currentTimeMillis)
       println("result " + result)
     }
     r
@@ -51,16 +53,13 @@ class Connection(remote: InetSocketAddress)(implicit system: ActorSystem) {
 
   def connect(): Future[Unit] = for {
     frame <- actorRef ? Request.startup map(_.asInstanceOf[Frame])
-    _ = println("FRAME = " + frame)
     body <- frame.body.toMat(Sink.fold(ByteString.empty)(_ ++ _))(Keep.right).run()
-    _ = println("BODY = " + body)
   } yield ()
 
   def connect(keyspace: String): Future[String] = for {
     _ <- connect
     frame <- actorRef ? Request.query(s"USE ${keyspace}", One) map(_.asInstanceOf[Frame])
-    body <- frame.body.toMat(Sink.foreach(println))(Keep.right).run()
-    _ = println("BODY = " + body)
+    body <- frame.body.runWith(Sink.fold(ByteString.empty)(_ ++ _))
     // result <- {
     //   frame.header.opcode match {
     //     case Opcode.Result =>
@@ -75,32 +74,37 @@ class Connection(remote: InetSocketAddress)(implicit system: ActorSystem) {
     //     case opcode => Future.failed(new IllegalStateException(s"The opcode is not one correct, expected SetKeyspace actual ${opcode}"))
     //   }
     // }
-  } yield "toto experiment"
+  } yield {
+    val Consumed(SetKeyspace(ks), _, _) = CassandraDecoders.resultHeader.decode(body)
+    ks
+  }
 
   def options(): Future[Map[String, List[String]]] = {
     for {
       frame <- actorRef ? Request.options map(_.asInstanceOf[Frame])
       body <- frame.body.toMat(Sink.fold(ByteString.empty)(_ ++ _))(Keep.right).run
-    } yield body.fromBytes[Map[String, List[String]]]._1
+    } yield CassandraDecoders.multimap.decode(body) match {
+      case Consumed(multimap, _, _) => multimap
+    }
   }
 
   def stream(query: String, cl: ConsistencyLevel): Future[Any] = for {
     frame <- actorRef ? Request.query(query, cl) map(_.asInstanceOf[Frame])
-    body <- frame.body.toMat(Sink.fold(ByteString.empty) { (prev, curr) =>
-      println("prev = " + prev)
-      println("curr = " + curr)
-      prev ++ curr
-    })(Keep.right).run()
+    body <- frame.body.runWith(Sink.fold(ByteString.empty)(_ ++ _))
     result <- {
       frame.header.opcode match {
         case Opcode.Result =>
-          val (resultHeader, remaining) = body.fromBytes[ResultHeader]
+          val Consumed(resultHeader, remaining, _) = CassandraDecoders.resultHeader.decode(body)
           resultHeader match {
             case r: Rows => Future.successful(r)
             case _ => Future.failed(new IllegalStateException("Expected rows result"))
           }
         case Opcode.Error =>
-          val ((errorCode, errorMessage), remaining) = body.fromBytes[(Int, String)]
+          val deco = for {
+            int <- CassandraDecoders.int
+            string <- CassandraDecoders.string
+          } yield (int, string)
+          val Consumed((errorCode, errorMessage), remaining, _) = deco.decode(body)
           Future.failed(new RuntimeException(s"(${errorCode}) ${errorMessage}"))
         case opcode => Future.failed(new IllegalStateException(s"The opcode is not one of expected ${opcode}"))
       }
@@ -121,7 +125,7 @@ class ConnectionActor(remote: InetSocketAddress)(implicit system: ActorSystem) e
   val runnable = Source.actorRef(1, OverflowStrategy.fail)
                   .via(
                     FrameHeaderBidi.framing
-                      .atop(FrameHeaderBidi.dump)
+                      // .atop(FrameHeaderBidi.dump)
                       .join(Tcp().outgoingConnection(remote))
                   )
                   .via(notifyListener)

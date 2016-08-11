@@ -24,6 +24,8 @@ object Decoder {
   def apply[A](f: ByteString => DecoderResult[A]): Decoder[A] = new Decoder[A] {
     def decode(bs: ByteString): DecoderResult[A] = f(bs) 
   }
+
+  def point[A](a: A) = Decoder[A](Consumed(a, _, 0))
 }
 
 sealed trait DecoderResult[+A]

@@ -19,7 +19,7 @@ case object Void extends ResultHeader
 case class Rows(
   flags: Int,
   columnsCount: Int,
-  pagingState: Option[List[Byte]],
+  pagingState: Option[ByteString],
   globalTableSpec: Option[(String, String)],
   colSpecs: List[(Option[(String, String)], String, ColumnType)],
   rowsCount: Int) extends ResultHeader

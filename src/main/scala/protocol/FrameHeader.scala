@@ -4,7 +4,6 @@ import akka.util.{ByteString, ByteStringBuilder}
 
 import cassandra._
 import cassandra.Encoders._
-import cassandra.Decoders._
 
 case class FrameHeader(
   version: Byte,
@@ -25,19 +24,5 @@ object FrameHeader extends BigEndian {
       .append(fh.opcode.toBytes)
       .putInt(fh.length)
       .result()
-  }
-
-  implicit val frameHeaderDecoder = Decoder[FrameHeader] { bytes =>
-    val (headerPayload, remaining) = bytes.splitAt(9)
-    val buf = headerPayload.iterator
-    val fh = FrameHeader(
-      buf.getByte,
-      buf.getByte,
-      buf.getShort,
-      ByteString(buf.getByte).fromBytes[Opcode]._1,
-      buf.getInt
-    )
-
-    (fh, remaining)
   }
 }

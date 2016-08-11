@@ -22,23 +22,23 @@ final class StreamDetacher[T](decoder: Decoder[T]) extends GraphStage[FlowShape[
     private var maybeSubSource: Option[SubSourceOutlet[ByteString]] = None
 
     override def onPush() {
-      println("onPush")
+      // println("onPush")
       buffer ++= grab(in)
 
       feed()
     }
 
     def feed() {
-      println("feed subSource = " + maybeSubSource + " buffer = " + buffer + " moreBytesRequired = " + moreBytesRequired)
+      // println("feed subSource = " + maybeSubSource + " buffer = " + buffer + " moreBytesRequired = " + moreBytesRequired)
 
       maybeSubSource match {
         case Some(subSource) =>
           if(moreBytesRequired <= buffer.length) { // more than require bytes, push and complete sub source
-            val (paylad, remaining) = buffer.splitAt(moreBytesRequired)
-            println("push to subSource " + paylad)
-            subSource.push(paylad) // push to sub source its required bytes
+            val (payload, remaining) = buffer.splitAt(moreBytesRequired)
+            // println("push to subSource " + payload)
+            subSource.push(payload) // push to sub source its required bytes
             buffer = remaining // some bytes left
-            moreBytesRequired -= paylad.length
+            moreBytesRequired -= payload.length
             // sub source has been completely push its required bytes
             subSource.complete()
             maybeSubSource = None
@@ -50,15 +50,15 @@ final class StreamDetacher[T](decoder: Decoder[T]) extends GraphStage[FlowShape[
             // do not pull here since the sub source should pull itself on backpressure
           }
           else { // if no data to push ask upstream
-            println("pull 1")
+            // println("pull 1")
             pull(in)
           }
         case None =>
           decoder.decode(buffer) match {
             case Consumed(t, remaining, requireMoreBytes) =>
-              println("create sub source")
+              // println("create sub source")
               val subSource = new SubSourceOutlet[ByteString]("SubSource")
-              subSource.setHandler(subSourceHandler)
+              subSource.setHandler(subSourceHandler(subSource))
 
               push(out, t -> Source.fromGraph(subSource.source))
 
@@ -66,38 +66,38 @@ final class StreamDetacher[T](decoder: Decoder[T]) extends GraphStage[FlowShape[
               buffer = remaining
               moreBytesRequired = requireMoreBytes
             case NotEnough =>
-              println("not enough => pull")
+              // println("not enough => pull")
               pull(in) // if not enough data just pull more to feed the decoder
           }
       }
     }
 
     override def onPull() {
-      println("onPull")
+      // println("onPull")
       if(isClosed(in)) completeStage()
       else pull(in)
     }
 
     override def onDownstreamFinish(): Unit = {
-      println("onDownstreamFinish")
+      // println("onDownstreamFinish")
       // completeStage()
       // Otherwise substream is open, ignore
     }
 
     override def onUpstreamFinish() {
-      println("onUpstreamFinish => continue")
+      // println("onUpstreamFinish => continue")
       // feed()
       // completeStage()
     }
 
     override def onUpstreamFailure(t: Throwable) {
-      println("onUpstreamFailure")
+      // println("onUpstreamFailure")
       failStage(t)
     }
 
-    def subSourceHandler = new OutHandler {
+    def subSourceHandler(source: SubSourceOutlet[ByteString]) = new OutHandler {
       def onPull() {
-        println("subSourceHandler.onPull")
+        // println("subSourceHandler.onPull")
         feed()
       }
     }
