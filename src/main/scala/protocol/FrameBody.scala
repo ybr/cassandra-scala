@@ -1,18 +1,14 @@
-package cassandra
+package cassandra.protocol
 
 import akka.NotUsed
 import akka.util.ByteString
 import akka.stream.scaladsl.Source
 
-sealed trait NoBody
-object NoBody extends NoBody
-
-class LongString(val str: String)
-
-case class Result(
-  header: ResultHeader,
-  body: Source[ByteString, NotUsed]
-)
+sealed trait FrameBody
+case class Error(code: Int, message: String) extends FrameBody
+case object Ready extends FrameBody
+case class Supported(values: Map[String, List[String]]) extends FrameBody
+case class Result(kind: Int, header: ResultHeader) extends FrameBody
 
 sealed trait ResultHeader
 case object Void extends ResultHeader

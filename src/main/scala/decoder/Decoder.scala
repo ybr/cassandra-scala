@@ -2,7 +2,7 @@ package cassandra.decoder
 
 import akka.util.ByteString
 
-trait Decoder[A] { self =>
+trait Decoder[+A] { self =>
   def decode(bs: ByteString): DecoderResult[A]
 
   def map[B](f: A => B): Decoder[B] = new Decoder[B] {
@@ -15,6 +15,13 @@ trait Decoder[A] { self =>
   def flatMap[B](f: A => Decoder[B]): Decoder[B] = new Decoder[B] {
     def decode(bs: ByteString): DecoderResult[B] = self.decode(bs) match {
       case Consumed(a, remainingA, _) => f(a).decode(remainingA)
+      case NotEnough => NotEnough
+    }
+  }
+
+  def more(f: A => Int): Decoder[A] = new Decoder[A] {
+    def decode(bs: ByteString): DecoderResult[A] = self.decode(bs) match {
+      case Consumed(a, remaining, _) => Consumed(a, remaining, f(a))
       case NotEnough => NotEnough
     }
   }

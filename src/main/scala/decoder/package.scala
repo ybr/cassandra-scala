@@ -1,3 +1,3 @@
 package cassandra
 
-package object decoder extends Decoders
+package object decoder
