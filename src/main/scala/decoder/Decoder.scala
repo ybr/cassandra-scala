@@ -14,7 +14,13 @@ trait Decoder[+A] { self =>
 
   def flatMap[B](f: A => Decoder[B]): Decoder[B] = new Decoder[B] {
     def decode(bs: ByteString): DecoderResult[B] = self.decode(bs) match {
-      case Consumed(a, remainingA, _) => f(a).decode(remainingA)
+      case Consumed(a, remainingA, moreBytesRequiredA) => f(a).decode(remainingA) match {
+        case Consumed(b, remainingB, moreBytesRequiredB) =>
+          // bytes have been consumed so more bytes required decreases accordingly
+          val newMoreBytesRequired = Math.max(0, moreBytesRequiredA - (bs.length - remainingB.length))
+          Consumed(b, remainingB, newMoreBytesRequired)
+        case NotEnough => NotEnough
+      }
       case NotEnough => NotEnough
     }
   }
@@ -33,6 +39,8 @@ object Decoder {
   }
 
   def point[A](a: A) = Decoder[A](Consumed(a, _, 0))
+
+  def more(moreBytesRequired: Int): Decoder[Unit] = Decoder(bs => Consumed((), bs, moreBytesRequired))
 }
 
 sealed trait DecoderResult[+A]

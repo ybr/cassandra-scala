@@ -22,15 +22,23 @@ object ProtoStream {
   def main(args: Array[String]) {
     implicit val system = ActorSystem()
 
+    implicit val materializer = ActorMaterializer.create(system)
+
     val conn = new Connection(new InetSocketAddress("192.168.99.100", 32769))
     val r = for {
       keyspace <- conn.connect("proto")
       _ = println("------------------------- START = " + System.currentTimeMillis)
       result <- conn.stream("SELECT data FROM test LIMIT 10", One)
+      columns <- result.via(Flow[Column].mapAsync(1) { col =>
+        col.content.runWith(Sink.seq).map { content =>
+          println("COLUMN COLUMN COLUMN COLUMN COLUMN COLUMN COLUMN COLUMN COLUMN COLUMN COLUMN COLUMN "  + content)
+          content
+        }
+      }).runWith(Sink.seq)
       // _ <- conn.stream("SELECT data FROM test LIMIT 10", One)
     } yield {
       println("------------------------- END = " + System.currentTimeMillis)
-      println("result " + result)
+      println("result " + columns)
     }
     r
     .recoverWith {
@@ -40,7 +48,7 @@ object ProtoStream {
         Future(())
     }
 
-    Thread.sleep(2000)
+    Thread.sleep(3000)
     system.shutdown()
     println("END")
   }
@@ -92,10 +100,13 @@ class Connection(remote: InetSocketAddress)(implicit system: ActorSystem) {
     }
   }
 
-  def stream(query: String, cl: ConsistencyLevel): Future[Any] = for {
+  def stream(query: String, cl: ConsistencyLevel): Future[Source[Column, NotUsed]] = for {
     (fh, fb, source) <- actorRef ? Request.query(query, cl) map(_.asInstanceOf[(FrameHeader, FrameBody, Source[ByteString, NotUsed])])
-    body <- source.runWith(Sink.fold(ByteString.empty)(_ ++ _))
-    result <- Future.successful(CassandraDecoders.frameBody(fh.opcode).decode(body)) // here
+    _ = println(s"?????????????????????? ${fh} ${fb} ${source}")
+    rowsHeader = fb.asInstanceOf[Result].header.asInstanceOf[Rows]
+    result = source
+                  .via(Flow.fromGraph(new StreamDetacher("ColumnDetacher", CassandraDecoders.int.more(identity)))
+                  .map(t => Column(t._2)))
   } yield result
 }
 

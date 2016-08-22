@@ -21,7 +21,7 @@ object FrameBodyBidi {
 
     val inbound = b.add(Flow[(FrameHeader, Source[ByteString, NotUsed])].flatMapConcat { case (fh, source) =>
       source
-      .via(Flow.fromGraph(new StreamDetacher("FrameBody", CassandraDecoders.frameBody(fh.opcode))).map { case (fb, source) =>
+      .via(Flow.fromGraph(new StreamDetacher("FrameBody", Decoder.more(fh.length).flatMap(_ => CassandraDecoders.frameBody(fh.opcode)))).map { case (fb, source) =>
         (fh, fb, source) // here is it the correct source ??
       })
     })
