@@ -10,7 +10,7 @@ import cassandra.Encoders._
 import cassandra.decoder._
 
 object FrameBodyBidi {
-  def framing(implicit mat: Materializer): BidiFlow[
+  def framing(implicit mat: Materializer, system: akka.actor.ActorSystem): BidiFlow[
     (FrameHeader, Source[ByteString, NotUsed]),
     (FrameHeader, Source[ByteString, NotUsed]),
     (FrameHeader, Source[ByteString, NotUsed]),
@@ -21,7 +21,7 @@ object FrameBodyBidi {
 
     val inbound = b.add(Flow[(FrameHeader, Source[ByteString, NotUsed])].flatMapConcat { case (fh, source) =>
       source
-      .via(Flow.fromGraph(new StreamDetacher("FrameBody", Decoder.more(fh.length).flatMap(_ => CassandraDecoders.frameBody(fh.opcode)))).map { case (fb, source) =>
+      .via(Flow.fromGraph(new StreamDetacher(Decoder.more(fh.length).flatMap(_ => CassandraDecoders.frameBody(fh.opcode)))).map { case (fb, source) =>
         (fh, fb, source) // here is it the correct source ??
       })
     })

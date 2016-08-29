@@ -19,36 +19,48 @@ import scala.concurrent.ExecutionContext.Implicits._
 import scala.concurrent.duration._
 
 object ProtoStream {
+  val nats: Source[Int, NotUsed] = Source.unfold(0)(n => Some(n + 1, n))
+
   def main(args: Array[String]) {
     implicit val system = ActorSystem()
 
     implicit val materializer = ActorMaterializer.create(system)
 
     val conn = new Connection(new InetSocketAddress("192.168.99.100", 32769))
-    val r = for {
+    val r: Future[ResultSource] = for {
       keyspace <- conn.connect("proto")
-      _ = println("------------------------- START = " + System.currentTimeMillis)
-      result <- conn.stream("SELECT data FROM test LIMIT 10", One)
-      columns <- result.via(Flow[Column].mapAsync(1) { col =>
-        col.content.runWith(Sink.seq).map { content =>
-          println("COLUMN COLUMN COLUMN COLUMN COLUMN COLUMN COLUMN COLUMN COLUMN COLUMN COLUMN COLUMN "  + content)
-          content
-        }
-      }).runWith(Sink.seq)
-      // _ <- conn.stream("SELECT data FROM test LIMIT 10", One)
+      start = System.currentTimeMillis
+      (fh, fb, columns) <- conn.stream("SELECT data FROM test LIMIT 30", One)
+      rows = columns.via(Flow.fromGraph(new Grouped[Column](fb.asInstanceOf[Result].header.asInstanceOf[Rows].columnsCount))).map(Row(_))
     } yield {
-      println("------------------------- END = " + System.currentTimeMillis)
-      println("result " + columns)
+      val end = System.currentTimeMillis
+      println(s"------------------------- Duration = ${end - start} (ms)")
+      println(fh)
+      println(fb)
+      ResultSource(rows)
     }
-    r
-    .recoverWith {
+
+    r.flatMap { result =>
+      result.rows.runWith(Sink.foreach { row =>
+        println("ROW ")
+        row.columns.runWith(Sink.foreach { column =>
+          println("\tCOLUMN")
+          column.content.runWith(Sink.foreach { bs =>
+            println("\t\tBYTES " + bs)
+          })
+        })
+      })
+    }
+
+    Await.result(r.recoverWith {
       case t =>
         println("ERROR TOTO " + t.getMessage)
         t.printStackTrace
         Future(())
-    }
+    }, 20 seconds)
 
-    Thread.sleep(3000)
+    Thread.sleep(1000)
+
     system.shutdown()
     println("END")
   }
@@ -63,30 +75,12 @@ class Connection(remote: InetSocketAddress)(implicit system: ActorSystem) {
 
   def connect(): Future[Unit] = for {
     (fh, fb, b) <- actorRef ? Request.startup map(_.asInstanceOf[(FrameHeader, FrameBody, Source[ByteString, akka.NotUsed])])
-    _ = println("Signet 1 " + fh)
-    _ = println("Signet 1 " + fb)
-    _ = {
-      val t: Source[ByteString, NotUsed] = b
-      println("Signet 1 " + b)
-    }
-    // empty source do not run it
-    // body <- b.via(Flow[ByteString].map { bs =>
-    //   println("Signet 3 " + bs)
-    // }).runWith(Sink.seq)
-  } yield {
-    // println("Signet 2 " + body)
-    println("Signet 2")
-    ()
-  }
+  } yield ()
 
   def connect(keyspace: String): Future[String] = for {
     _ <- connect
-    _ = println("AFTER CONNECT")
     (fh, fb, source) <- actorRef ? Request.query(s"USE ${keyspace}", One) map(_.asInstanceOf[(FrameHeader, FrameBody, Source[ByteString, NotUsed])])
-    _ = println("Signet 1i " + fh + " " + fb + " " + source)
-    // body <- source.runWith(Sink.fold(ByteString.empty)(_ ++ _))
   } yield {
-    println("TOTOTOTOTOTOTOTO")
     val Result(_, SetKeyspace(ks)) = fb
     ks
   }
@@ -100,14 +94,13 @@ class Connection(remote: InetSocketAddress)(implicit system: ActorSystem) {
     }
   }
 
-  def stream(query: String, cl: ConsistencyLevel): Future[Source[Column, NotUsed]] = for {
+  def stream(query: String, cl: ConsistencyLevel): Future[(FrameHeader, FrameBody, Source[Column, NotUsed])] = for {
     (fh, fb, source) <- actorRef ? Request.query(query, cl) map(_.asInstanceOf[(FrameHeader, FrameBody, Source[ByteString, NotUsed])])
-    _ = println(s"?????????????????????? ${fh} ${fb} ${source}")
     rowsHeader = fb.asInstanceOf[Result].header.asInstanceOf[Rows]
     result = source
-                  .via(Flow.fromGraph(new StreamDetacher("ColumnDetacher", CassandraDecoders.int.more(identity)))
+                  .via(Flow.fromGraph(new StreamDetacher(CassandraDecoders.int.more(identity)))
                   .map(t => Column(t._2)))
-  } yield result
+  } yield (fh, fb, result)
 }
 
 class ConnectionActor(remote: InetSocketAddress)(implicit system: ActorSystem) extends Actor {
@@ -124,7 +117,13 @@ class ConnectionActor(remote: InetSocketAddress)(implicit system: ActorSystem) e
                   .via(
                       FrameBodyBidi.framing
                       .atop(FrameHeaderBidi.framing)
-                      .atop(TcpDumpBidi.dump)
+                      // dump IO
+                      // .atop(TcpDumpBidi.dump)
+                      // buffer IO
+                      // .atop(BidiFlow.fromFlows(
+                      //   Flow[ByteString].buffer(10, OverflowStrategy.backpressure),
+                      //   Flow[ByteString].buffer(10, OverflowStrategy.backpressure)
+                      // ))
                       .join(Tcp().outgoingConnection(remote))
                   )
                   .via(notifyListener)

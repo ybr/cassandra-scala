@@ -10,9 +10,9 @@ import cassandra.decoder.{Consumed, Decoder, NotEnough}
 
 import scala.concurrent.duration._
 
-final class StreamDetacher[T](label: String, decoder: Decoder[T]) extends GraphStage[FlowShape[ByteString, (T, Source[ByteString, NotUsed])]] {
-  val in: Inlet[ByteString] = Inlet("StreamSplitter.in")
-  val out: Outlet[(T, Source[ByteString, NotUsed])] = Outlet("StreamSplitter.out")
+final class StreamDetacher[T](decoder: Decoder[T]) extends GraphStage[FlowShape[ByteString, (T, Source[ByteString, NotUsed])]] {
+  val in: Inlet[ByteString] = Inlet("StreamDetacher.in")
+  val out: Outlet[(T, Source[ByteString, NotUsed])] = Outlet("StreamDetacher.out")
 
   override val shape: FlowShape[ByteString, (T, Source[ByteString, NotUsed])] = FlowShape(in, out)
 
@@ -22,21 +22,16 @@ final class StreamDetacher[T](label: String, decoder: Decoder[T]) extends GraphS
     private var maybeSubSource: Option[SubSourceOutlet[ByteString]] = None
 
     override def onPush() {
-      // println(s"[${label}] onPush")
       buffer ++= grab(in)
-
       feed()
     }
 
     def feed() {
-      // println(s"[${label}] feed subSource = " + maybeSubSource + " buffer = " + buffer + " moreBytesRequired = " + moreBytesRequired)
-
       maybeSubSource match {
         case Some(subSource) =>
           if(subSource.isAvailable) {
             if(moreBytesRequired <= buffer.length) { // more than require bytes, push and complete sub source
               val (payload, remaining) = buffer.splitAt(moreBytesRequired)
-              // println(s"[${label}] push to subSource payload = " + payload + " remaining = " + remaining)
               subSource.push(payload) // push to sub source its required bytes
               buffer = remaining // some bytes left
               moreBytesRequired -= payload.length
@@ -51,59 +46,49 @@ final class StreamDetacher[T](label: String, decoder: Decoder[T]) extends GraphS
               // do not pull here since the sub source should pull itself on backpressure
             }
             else { // if no data to push ask upstream
-              // println(s"[${label}] pull 1")
               pull(in)
             }
           }
         case None =>
           decoder.decode(buffer) match {
             case Consumed(t, remaining, requireMoreBytes) =>
-              // println(s"[${label}] Consumed entity ${t} ${remaining} ${requireMoreBytes}")
-              // println(s"[${label}] create sub source")
               val subSource = new SubSourceOutlet[ByteString]("SubSource")
               subSource.setHandler(subSourceHandler(subSource))
 
               val subFromGraph = Source.fromGraph(subSource.source)
-              // println(s"[${label}] Newly created sub from graph ${subFromGraph}")
               push(out, t -> subFromGraph)
 
               maybeSubSource = Some(subSource)
               buffer = remaining
               moreBytesRequired = requireMoreBytes
             case NotEnough =>
-              // println(s"[${label}] not enough => pull")
               pull(in) // if not enough data just pull more to feed the decoder
           }
       }
     }
 
     override def onPull() {
-      // println(s"[${label}] onPull")
       if(buffer.isEmpty && isClosed(in)) completeStage()
       else if(buffer.length > 0) feed()
       else pull(in)
     }
 
     override def onDownstreamFinish(): Unit = {
-      // println(s"[${label}] onDownstreamFinish")
       // completeStage()
       // Otherwise substream is open, ignore
     }
 
     override def onUpstreamFinish() {
-      // println(s"[${label}] onUpstreamFinish => continue")
       // feed()
-      // completeStage()
+      completeStage()
     }
 
     override def onUpstreamFailure(t: Throwable) {
-      // println(s"[${label}] onUpstreamFailure " + t)
       failStage(t)
     }
 
     def subSourceHandler(source: SubSourceOutlet[ByteString]) = new OutHandler {
       def onPull() {
-        // println(s"[${label}] subSourceHandler.onPull")
         feed()
       }
     }
