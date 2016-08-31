@@ -22,11 +22,13 @@ final class StreamDetacher[T](decoder: Decoder[T]) extends GraphStage[FlowShape[
     private var maybeSubSource: Option[SubSourceOutlet[ByteString]] = None
 
     override def onPush() {
+      // println("StreamDetacher.onPush")
       buffer ++= grab(in)
       feed()
     }
 
     def feed() {
+      // println("StreamDetacher.feed maybeSubSource = " + maybeSubSource + ", buffer = " + buffer.length)
       maybeSubSource match {
         case Some(subSource) =>
           if(subSource.isAvailable) {
@@ -45,9 +47,7 @@ final class StreamDetacher[T](decoder: Decoder[T]) extends GraphStage[FlowShape[
               buffer = ByteString.empty // everything has been pushed, no byte left
               // do not pull here since the sub source should pull itself on backpressure
             }
-            else { // if no data to push ask upstream
-              pull(in)
-            }
+            else pull(in) // if no data to push ask upstream
           }
         case None =>
           decoder.decode(buffer) match {
@@ -56,39 +56,55 @@ final class StreamDetacher[T](decoder: Decoder[T]) extends GraphStage[FlowShape[
               subSource.setHandler(subSourceHandler(subSource))
 
               val subFromGraph = Source.fromGraph(subSource.source)
+              // println(s"StreamDetacher.push(out) : ${t}")
               push(out, t -> subFromGraph)
 
               maybeSubSource = Some(subSource)
               buffer = remaining
               moreBytesRequired = requireMoreBytes
             case NotEnough =>
-              pull(in) // if not enough data just pull more to feed the decoder
+              // upstream exhausted, we can't feed downstream any further
+              if(isClosed(in)) completeStage()
+              else pull(in) // if not enough data just pull more to feed the decoder
           }
       }
+
+      // upstream exhausted and everything push downstream => completed
+      if(buffer.length == 0 && isClosed(in)) completeStage()
     }
 
     override def onPull() {
+      // println("StreamDetacher.onPull " + buffer.length + " " + isClosed(in))
       if(buffer.isEmpty && isClosed(in)) completeStage()
       else if(buffer.length > 0) feed()
-      else pull(in)
+      else {
+        // println("StreamDetacher.pull")
+        pull(in)
+      }
     }
 
     override def onDownstreamFinish(): Unit = {
-      // completeStage()
+      // println("StreamDetacher.onDownstreamFinish")
+      completeStage()
       // Otherwise substream is open, ignore
     }
 
     override def onUpstreamFinish() {
       // feed()
-      completeStage()
+      // println("StreamDetacher.onUpstreamFinish")
+      // nothing to push further and upstream exhausted
+      if(buffer.length == 0) completeStage()
     }
 
     override def onUpstreamFailure(t: Throwable) {
+      // println("StreamDetacher.onUpstreamFailure")
+      t.printStackTrace
       failStage(t)
     }
 
     def subSourceHandler(source: SubSourceOutlet[ByteString]) = new OutHandler {
       def onPull() {
+        // println("StreamDetacher.subSourceHandler.onPull")
         feed()
       }
     }

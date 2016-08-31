@@ -82,6 +82,7 @@ final class Grouped[T](n: Int) extends GraphStage[FlowShape[T, Source[T, NotUsed
 
     override def onUpstreamFailure(t: Throwable) {
       // println("Group.onUpstreamFailure")
+      t.printStackTrace
       failStage(t)
     }
 

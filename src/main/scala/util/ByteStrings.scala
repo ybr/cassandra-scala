@@ -12,7 +12,7 @@ object ByteStrings {
 
     val builder = StringBuilder.newBuilder
     for(i ← 0 until bytes.size by 16) {
-      val line = bytes.slice(i, i + 16)
+      val line = bytes.slice(i, Math.min(i + 16, bytes.length))
       val (l8, r8) = line.splitAt(8)
 
       builder.append(pos(i))

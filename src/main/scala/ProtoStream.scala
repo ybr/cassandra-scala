@@ -17,10 +17,9 @@ import java.net.InetSocketAddress
 import scala.concurrent._
 import scala.concurrent.ExecutionContext.Implicits._
 import scala.concurrent.duration._
+import scala.util._
 
 object ProtoStream {
-  val nats: Source[Int, NotUsed] = Source.unfold(0)(n => Some(n + 1, n))
-
   def main(args: Array[String]) {
     implicit val system = ActorSystem()
 
@@ -30,7 +29,8 @@ object ProtoStream {
     val r: Future[ResultSource] = for {
       keyspace <- conn.connect("proto")
       start = System.currentTimeMillis
-      (fh, fb, columns) <- conn.stream("SELECT data FROM test LIMIT 30", One)
+      (fh, fb, columns) <- conn.stream("SELECT data FROM test LIMIT 1", One)
+      _ = println("Columns count = " + fb.asInstanceOf[Result].header.asInstanceOf[Rows].columnsCount)
       rows = columns.via(Flow.fromGraph(new Grouped[Column](fb.asInstanceOf[Result].header.asInstanceOf[Rows].columnsCount))).map(Row(_))
     } yield {
       val end = System.currentTimeMillis
@@ -40,26 +40,37 @@ object ProtoStream {
       ResultSource(rows)
     }
 
-    r.flatMap { result =>
-      result.rows.runWith(Sink.foreach { row =>
-        println("ROW ")
-        row.columns.runWith(Sink.foreach { column =>
-          println("\tCOLUMN")
-          column.content.runWith(Sink.foreach { bs =>
-            println("\t\tBYTES " + bs)
-          })
-        })
-      })
+    val r1 = r.flatMap { result =>
+      println("RESULT")
+      result.rows.mapAsync(1) { row =>
+        // println("ROW")
+        row.columns.mapAsync(1) { column =>
+          // println("\tCOLUMN")
+          column.content.mapAsync(1) { bs =>
+            // println("\t\tBYTES " + bs)
+            Future.successful(bs)
+          }
+          .runWith(Sink.seq)
+        }
+        .runWith(Sink.seq)
+      }
+      .runWith(Sink.seq)
     }
 
-    Await.result(r.recoverWith {
+    val start = System.currentTimeMillis
+    val t = Try(Await.result(r1.recoverWith {
       case t =>
         println("ERROR TOTO " + t.getMessage)
         t.printStackTrace
         Future(())
-    }, 20 seconds)
+    }, 50 second))
+    val end = System.currentTimeMillis
+    println(s"Duration: ${end - start}(ms)")
 
-    Thread.sleep(1000)
+    t match {
+      case Success(v) => println("OK " + v.asInstanceOf[Vector[Vector[Vector[ByteString]]]].size)
+      case Failure(t) => t.printStackTrace
+    }
 
     system.shutdown()
     println("END")
@@ -74,7 +85,7 @@ class Connection(remote: InetSocketAddress)(implicit system: ActorSystem) {
   val actorRef = system.actorOf(ConnectionActor.props(remote))
 
   def connect(): Future[Unit] = for {
-    (fh, fb, b) <- actorRef ? Request.startup map(_.asInstanceOf[(FrameHeader, FrameBody, Source[ByteString, akka.NotUsed])])
+    _ <- actorRef ? Request.startup
   } yield ()
 
   def connect(keyspace: String): Future[String] = for {
