@@ -26,49 +26,24 @@ object ProtoStream {
     implicit val materializer = ActorMaterializer.create(system)
 
     val conn = new Connection(new InetSocketAddress("192.168.99.100", 32769))
-    val r: Future[ResultSource] = for {
+    val r1: Future[Unit] = for {
       keyspace <- conn.connect("proto")
-      start = System.currentTimeMillis
-      (fh, fb, columns) <- conn.stream("SELECT data FROM test LIMIT 1", One)
-      _ = println("Columns count = " + fb.asInstanceOf[Result].header.asInstanceOf[Rows].columnsCount)
-      rows = columns.via(Flow.fromGraph(new Grouped[Column](fb.asInstanceOf[Result].header.asInstanceOf[Rows].columnsCount))).map(Row(_))
-    } yield {
-      val end = System.currentTimeMillis
-      println(s"------------------------- Duration = ${end - start} (ms)")
-      println(fh)
-      println(fb)
-      ResultSource(rows)
-    }
+      _ <- Dao.get(conn, materializer)
+      _ <- Dao.get(conn, materializer)
+      _ <- Dao.get(conn, materializer)
+      _ <- Dao.get(conn, materializer)
+      _ <- Dao.get(conn, materializer)
+      _ <- Dao.get(conn, materializer)
+      _ <- Dao.get(conn, materializer)
+    } yield ()
 
-    val r1 = r.flatMap { result =>
-      println("RESULT")
-      result.rows.mapAsync(1) { row =>
-        // println("ROW")
-        row.columns.mapAsync(1) { column =>
-          // println("\tCOLUMN")
-          column.content.mapAsync(1) { bs =>
-            // println("\t\tBYTES " + bs)
-            Future.successful(bs)
-          }
-          .runWith(Sink.seq)
-        }
-        .runWith(Sink.seq)
-      }
-      .runWith(Sink.seq)
-    }
-
-    val start = System.currentTimeMillis
-    val t = Try(Await.result(r1.recoverWith {
+    Try(Await.result(r1.recoverWith {
       case t =>
         println("ERROR TOTO " + t.getMessage)
         t.printStackTrace
         Future(())
-    }, 50 second))
-    val end = System.currentTimeMillis
-    println(s"Duration: ${end - start}(ms)")
-
-    t match {
-      case Success(v) => println("OK " + v.asInstanceOf[Vector[Vector[Vector[ByteString]]]].size)
+    }, 50 second)) match {
+      case Success(v) => println("OK")
       case Failure(t) => t.printStackTrace
     }
 
@@ -124,7 +99,7 @@ class ConnectionActor(remote: InetSocketAddress)(implicit system: ActorSystem) e
     f
   }
 
-  val runnable = Source.actorRef(10, OverflowStrategy.fail) // here might be here why it fails
+  val runnable = Source.actorRef(1, OverflowStrategy.fail) // here might be here why it fails
                   .via(
                       FrameBodyBidi.framing
                       .atop(FrameHeaderBidi.framing)
@@ -143,13 +118,12 @@ class ConnectionActor(remote: InetSocketAddress)(implicit system: ActorSystem) e
 
   def receive = {
     case frame @ (FrameHeader(version, _, _, _, _), source) if version == 0x04 => // request
+      println("Received query")
       listenerRef = Some(sender)
       tcpActor ! frame
-    // case frame: Frame if frame.header.version == -124 => // response
-    //   listenerRef.foreach(_ ! frame)
-    //   listenerRef = None
 
     case frame @ (FrameHeader(version, _, _, _, _), fb, source) if version == -124 => // response
+      println("Received response")
       listenerRef.foreach(_ ! frame)
       listenerRef = None
 
@@ -162,4 +136,38 @@ class ConnectionActor(remote: InetSocketAddress)(implicit system: ActorSystem) e
 
 object ConnectionActor {
   def props(remote: InetSocketAddress)(implicit system: ActorSystem) = Props(classOf[ConnectionActor], remote, system)
+}
+
+object Dao {
+  def get(implicit conn: Connection, mat: Materializer): Future[Unit] = {
+    val start = System.currentTimeMillis
+    var firstOctetTimeMS = 0L
+    val r = for {
+      (fh, fb, columns) <- conn.stream("SELECT values FROM one LIMIT 1", One)
+      rows = columns.via(Flow.fromGraph(new Grouped[Column](fb.asInstanceOf[Result].header.asInstanceOf[Rows].columnsCount))).map(Row(_))
+    } yield ResultSource(rows)
+
+    r.flatMap { result =>
+      // println("RESULT")
+      result.rows.mapAsync(1) { row =>
+        // println("ROW")
+        row.columns.mapAsync(1) { column =>
+          // println("\tCOLUMN")
+          column.content.mapAsync(1) { bs =>
+            // println("\t\tBYTES " + bs)
+            if(firstOctetTimeMS == 0) firstOctetTimeMS = System.currentTimeMillis
+            Future.successful(bs)
+          }
+          .runWith(Sink.seq)
+        }
+        .runWith(Sink.seq)
+      }
+      .runWith(Sink.seq)
+    }.map { bytes =>
+      val end = System.currentTimeMillis
+      println(bytes.asInstanceOf[Vector[Vector[Vector[ByteString]]]](0)(0).map(_.size).sum)
+      println(s"First byte duration: ${firstOctetTimeMS - start}(ms)")
+      println(s"Total duration: ${end - start}(ms)")
+    }
+  }
 }
