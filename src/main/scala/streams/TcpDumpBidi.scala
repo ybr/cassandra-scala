@@ -10,7 +10,7 @@ import util.ByteStrings
 object TcpDumpBidi {
   val dump: BidiFlow[ByteString, ByteString, ByteString, ByteString, NotUsed] = BidiFlow.fromGraph(GraphDSL.create() { implicit b =>
     def ios(direction: String) = Flow[ByteString].map { bytes =>
-      println(direction)
+      println(direction + " " + System.currentTimeMillis)
       println(ByteStrings.dump(bytes))
       bytes
     }
