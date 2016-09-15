@@ -1,4 +1,6 @@
-name := """cassandra-scala-driver"""
+organization := "com.github.ybr"
+
+name := "cassandra-scala-driver"
 
 version := "0.1-SNAPSHOT"
 
