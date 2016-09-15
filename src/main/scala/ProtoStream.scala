@@ -28,13 +28,27 @@ object ProtoStream {
     val conn = new Connection(new InetSocketAddress("192.168.99.100", 32769))
     val r1: Future[Unit] = for {
       keyspace <- conn.connect("proto")
-      _ <- Dao.get(conn, materializer)
-      _ <- Dao.get(conn, materializer)
-      _ <- Dao.get(conn, materializer)
-      _ <- Dao.get(conn, materializer)
-      _ <- Dao.get(conn, materializer)
-      _ <- Dao.get(conn, materializer)
-      _ <- Dao.get(conn, materializer)
+      _ <- Dao.get1(conn, materializer)
+      _ <- Dao.get1(conn, materializer)
+      _ <- Dao.get1(conn, materializer)
+      _ <- Dao.get1(conn, materializer)
+      _ <- Dao.get1(conn, materializer)
+      _ <- Dao.get1(conn, materializer)
+      _ <- Dao.get1(conn, materializer)
+      _ <- Dao.get1(conn, materializer)
+      _ <- Dao.get1(conn, materializer)
+      _ <- Dao.get1(conn, materializer)
+      _ <- Dao.get1(conn, materializer)
+      _ <- Dao.get1(conn, materializer)
+      _ <- Dao.get1(conn, materializer)
+      _ <- Dao.get1(conn, materializer)
+      _ <- Dao.get1(conn, materializer)
+      _ <- Dao.get1(conn, materializer)
+      _ <- Dao.get1(conn, materializer)
+      _ <- Dao.get1(conn, materializer)
+      _ <- Dao.get1(conn, materializer)
+      _ <- Dao.get1(conn, materializer)
+      _ <- Dao.get1(conn, materializer)
     } yield ()
 
     Try(Await.result(r1.recoverWith {
@@ -80,12 +94,13 @@ class Connection(remote: InetSocketAddress)(implicit system: ActorSystem) {
     }
   }
 
+  val detacher  = Flow.fromGraph(new StreamDetacher(CassandraDecoders.int.more(identity)))
+                  .map(t => Column(t._2))
+
   def stream(query: String, cl: ConsistencyLevel): Future[(FrameHeader, FrameBody, Source[Column, NotUsed])] = for {
     (fh, fb, source) <- actorRef ? Request.query(query, cl) map(_.asInstanceOf[(FrameHeader, FrameBody, Source[ByteString, NotUsed])])
     rowsHeader = fb.asInstanceOf[Result].header.asInstanceOf[Rows]
-    result = source
-                  .via(Flow.fromGraph(new StreamDetacher(CassandraDecoders.int.more(identity)))
-                  .map(t => Column(t._2)))
+    result = source.via(detacher)
   } yield (fh, fb, result)
 
   def stream1(query: String, cl: ConsistencyLevel): Future[(FrameHeader, FrameBody, Source[ByteString, NotUsed])] = {
