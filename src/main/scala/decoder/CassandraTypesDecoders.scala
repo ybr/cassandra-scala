@@ -17,8 +17,8 @@ trait CassandraTypesDecoders extends DefaultDecoders with BigEndian {
 
   val string: Decoder[String] = for {
     size <- short
-    bytes <- list(size)(byte)
-  } yield new String(bytes.toArray, "UTF-8")
+    bytes <- scalar[Array[Byte]](size)(_.getBytes(size))
+  } yield new String(bytes, "UTF-8")
 
   val strings: Decoder[List[String]] = for {
     size <- short
