@@ -11,7 +11,7 @@ trait DefaultDecoders {
   def scalar[A](bytesSize: Int)(extract: ByteIterator => A)(implicit byteOrder: ByteOrder) = Decoder[A] { bs =>
     if(bs.length >= bytesSize) {
       val (payload, remaining) = bs.splitAt(bytesSize)
-      Consumed(extract(payload.iterator), remaining, 0)
+      Consumed(extract(payload.iterator), remaining)
     }
     else NotEnough
   }

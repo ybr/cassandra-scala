@@ -28,27 +28,10 @@ object ProtoStream {
     val conn = new Connection(new InetSocketAddress("192.168.99.100", 32769))
     val r1: Future[Unit] = for {
       keyspace <- conn.connect("proto")
-      _ <- Dao.get1(conn, materializer)
-      _ <- Dao.get1(conn, materializer)
-      _ <- Dao.get1(conn, materializer)
-      _ <- Dao.get1(conn, materializer)
-      _ <- Dao.get1(conn, materializer)
-      _ <- Dao.get1(conn, materializer)
-      _ <- Dao.get1(conn, materializer)
-      _ <- Dao.get1(conn, materializer)
-      _ <- Dao.get1(conn, materializer)
-      _ <- Dao.get1(conn, materializer)
-      _ <- Dao.get1(conn, materializer)
-      _ <- Dao.get1(conn, materializer)
-      _ <- Dao.get1(conn, materializer)
-      _ <- Dao.get1(conn, materializer)
-      _ <- Dao.get1(conn, materializer)
-      _ <- Dao.get1(conn, materializer)
-      _ <- Dao.get1(conn, materializer)
-      _ <- Dao.get1(conn, materializer)
-      _ <- Dao.get1(conn, materializer)
-      _ <- Dao.get1(conn, materializer)
-      _ <- Dao.get1(conn, materializer)
+      start = System.currentTimeMillis
+      _ <- loop(10000)(Dao.get1(conn, materializer))
+      end = System.currentTimeMillis
+      _ = println(s"Total: ${end - start}(ms)")
     } yield ()
 
     Try(Await.result(r1.recoverWith {
@@ -56,7 +39,7 @@ object ProtoStream {
         println("ERROR TOTO " + t.getMessage)
         t.printStackTrace
         Future(())
-    }, 50 second)) match {
+    }, 10 second)) match {
       case Success(v) => println("OK")
       case Failure(t) => t.printStackTrace
     }
@@ -64,6 +47,8 @@ object ProtoStream {
     system.terminate()
     println("END")
   }
+
+  def loop(n: Int)(f: => Future[Unit])(implicit ec: ExecutionContext): Future[Unit] = if(n == 0) Future.successful(()) else f.flatMap(_ => loop(n - 1)(f))
 }
 
 class Connection(remote: InetSocketAddress)(implicit system: ActorSystem) {
@@ -79,32 +64,51 @@ class Connection(remote: InetSocketAddress)(implicit system: ActorSystem) {
 
   def connect(keyspace: String): Future[String] = for {
     _ <- connect
-    (fh, fb, source) <- actorRef ? Request.query(s"USE ${keyspace}", One) map(_.asInstanceOf[(FrameHeader, FrameBody, Source[ByteString, NotUsed])])
+    result <- actorRef ? Request.query(s"USE ${keyspace}", One) map(_.asInstanceOf[DetachResult[(FrameHeader, FrameBody)]])
+    _ = println(result)
   } yield {
+    val Complete((fh, fb), _) = result
     val Result(_, SetKeyspace(ks)) = fb
     ks
   }
 
   def options(): Future[Map[String, List[String]]] = {
     for {
-      (fh, fb, source) <- actorRef ? Request.options map(_.asInstanceOf[(FrameHeader, FrameBody, Source[ByteString, NotUsed])])
-      body <- source.toMat(Sink.fold(ByteString.empty)(_ ++ _))(Keep.right).run
+      result <- actorRef ? Request.options map(_.asInstanceOf[DetachResult[(FrameHeader, FrameBody)]])
+      body <- result match {
+        case Complete(_ , body) => Future.successful(body)
+        case Partial(_, source) => source.toMat(Sink.fold(ByteString.empty)(_ ++ _))(Keep.right).run
+      }
     } yield CassandraDecoders.multimap.decode(body) match {
-      case Consumed(multimap, _, _) => multimap
+      case Consumed(multimap, _) => multimap
     }
   }
 
-  val detacher  = Flow.fromGraph(new StreamDetacher(CassandraDecoders.int.more(identity)))
-                  .map(t => Column(t._2))
+  val detacher  = Flow.fromGraph(new StreamDetacher(CassandraDecoders.int)(identity))
+                  .map {
+                    case Partial(_, source) => Column(source)
+                    case Complete(_, bytes) => Column(Source.single(bytes))
+                  }
 
   def stream(query: String, cl: ConsistencyLevel): Future[(FrameHeader, FrameBody, Source[Column, NotUsed])] = for {
-    (fh, fb, source) <- actorRef ? Request.query(query, cl) map(_.asInstanceOf[(FrameHeader, FrameBody, Source[ByteString, NotUsed])])
-    rowsHeader = fb.asInstanceOf[Result].header.asInstanceOf[Rows]
-    result = source.via(detacher)
-  } yield (fh, fb, result)
+    frame <- actorRef ? Request.query(query, cl) map(_.asInstanceOf[DetachResult[(FrameHeader, FrameBody)]])
+  } yield frame match {
+    case Complete((fh, fb), bytes) =>
+      val rowsHeader = fb.asInstanceOf[Result].header.asInstanceOf[Rows]
+      val Consumed(columns, _) = CassandraDecoders.list(rowsHeader.rowsCount * rowsHeader.columnsCount)(CassandraDecoders.bytes.map(bytes => Column(Source.single(bytes)))).decode(bytes)
+      (fh, fb, Source(columns))
+
+    case Partial((fh, fb), source) =>
+      (fh, fb, source.via(detacher))
+  }
 
   def stream1(query: String, cl: ConsistencyLevel): Future[(FrameHeader, FrameBody, Source[ByteString, NotUsed])] = {
-    actorRef ? Request.query(query, cl) map(_.asInstanceOf[(FrameHeader, FrameBody, Source[ByteString, NotUsed])])
+    for {
+      result <- actorRef ? Request.query(query, cl) map(_.asInstanceOf[DetachResult[(FrameHeader, FrameBody)]])
+    } yield result match {
+      case Complete((fh, fb), bytes) => (fh, fb, Source.single(bytes))
+      case Partial((fh, fb), source) => (fh, fb, source)
+    }
   }
 }
 
@@ -113,7 +117,7 @@ class ConnectionActor(remote: InetSocketAddress)(implicit system: ActorSystem) e
 
   var listenerRef: Option[ActorRef] = None
 
-  val notifyListener = Flow[(FrameHeader, FrameBody, Source[ByteString, akka.NotUsed])].map { f =>
+  val notifyListener = Flow[DetachResult[(FrameHeader, FrameBody)]].map { f =>
     self ! f
     f
   }
@@ -121,10 +125,14 @@ class ConnectionActor(remote: InetSocketAddress)(implicit system: ActorSystem) e
   val runnable = Source.actorRef(1, OverflowStrategy.fail) // here might be here why it fails
                   .via(
                     Fusing.aggressive(
-                      FrameBodyBidi.framing
-                      .atop(FrameHeaderBidi.framing)
+                      // FrameBodyBidi.framing
+                      // .atop(
+                        FrameHeaderBidi.framing
+                        // )
+                      // .atop(BenchBidi.dump)
                       // dump IO
                       // .atop(TcpDumpBidi.dump)
+                      // .atop(BenchBidi.dump)
                       // buffer IO
                       // .atop(BidiFlow.fromFlows(
                       //   Flow[ByteString].buffer(10, OverflowStrategy.backpressure),
@@ -141,7 +149,13 @@ class ConnectionActor(remote: InetSocketAddress)(implicit system: ActorSystem) e
       listenerRef = Some(sender)
       tcpActor ! frame
 
-    case frame @ (FrameHeader(version, _, _, _, _), fb, source) if version == -124 => // response
+    case frame @ Complete((fh, fb), bytes)  =>
+      // println("Complete")
+      listenerRef.foreach(_ ! frame)
+      listenerRef = None
+
+    case frame @ Partial((fh, fb), bytes)  =>
+      println("Partial " + fh)
       listenerRef.foreach(_ ! frame)
       listenerRef = None
 
@@ -161,8 +175,8 @@ object Dao {
     val start = System.currentTimeMillis
     var firstOctetTimeMS = 0L
     val r = for {
-      // (fh, fb, columns) <- conn.stream("SELECT values FROM one LIMIT 10", One)
-      (fh, fb, columns) <- conn.stream("SELECT data FROM test LIMIT 1", One)
+      (fh, fb, columns) <- conn.stream("SELECT values FROM one LIMIT 1", One)
+      // (fh, fb, columns) <- conn.stream("SELECT data FROM test LIMIT 1", One)
       // (fh, fb, columns) <- conn.stream("SELECT data FROM test LIMIT 300000", One)
       rows = columns.via(Flow.fromGraph(new Grouped[Column](fb.asInstanceOf[Result].header.asInstanceOf[Rows].columnsCount))).map(Row(_))
     } yield ResultSource(rows)
@@ -183,34 +197,16 @@ object Dao {
         .runWith(Sink.seq)
       }
       .runWith(Sink.seq)
-    }.map { bytes =>
-      val end = System.currentTimeMillis
-      println(bytes.asInstanceOf[Vector[Vector[Vector[ByteString]]]](0)(0).map(_.size).sum)
-      println("ROWS " + bytes.asInstanceOf[Vector[Vector[Vector[ByteString]]]].size)
-      println(s"First byte duration: ${firstOctetTimeMS - start}(ms)")
-      println(s"Total duration: ${end - start}(ms)")
-    }
+    }.map(_ => ())
   }
 
   def get1(implicit conn: Connection, mat: Materializer): Future[Unit] = {
-    val start = System.currentTimeMillis
-    var firstOctetTimeMS = 0L
-    val r = for {
+    for {
       (fh, fb, source) <- conn.stream1("SELECT data FROM test LIMIT 1", One)
+      // (fh, fb, source) <- conn.stream1("SELECT values FROM one LIMIT 1", One)
       // (fh, fb, source) <- conn.stream1("SELECT data FROM test LIMIT 300000", One)
-      bytes <- source.mapAsync(1) { bs =>
-        if(firstOctetTimeMS == 0) firstOctetTimeMS = System.currentTimeMillis
-        Future.successful(bs)
-      }
-      .runWith(Sink.seq)
-    } yield bytes
-
-
-    r.map { bytes =>
-      val end = System.currentTimeMillis
-      println("Bytes " + bytes.asInstanceOf[Vector[ByteString]].map(_.size).sum)
-      println(s"First byte duration: ${firstOctetTimeMS - start}(ms)")
-      println(s"Total duration: ${end - start}(ms)")
-    }
+      // _ = println("Signet 1")
+      bytes <- source.runWith(Sink.seq)
+    } yield () //println("Signet 2")
   }
 }

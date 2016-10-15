@@ -17,15 +17,16 @@ import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
 
 class StreamDetacherSpec extends FlatSpec with Matchers {
-  val headerBodyFlow = Flow[(FrameHeader, Source[ByteString, NotUsed])].flatMapConcat { case (header, body) =>
-    body.via(Flow[ByteString].map(b => (header, b)))
+  val headerBodyFlow = Flow[DetachResult[FrameHeader]].flatMapConcat {
+    case Complete(header, bytes) => Source.single(header -> bytes)
+    case Partial(header, source) => source.via(Flow[ByteString].map(b => (header, b)))
   }
 
   it should "push one element" in {
     WithMaterializer { implicit materializer =>
       val bytes = ByteString(0x84, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x0b)
 
-      val flow = new StreamDetacher(CassandraDecoders.frameHeader)
+      val flow = new StreamDetacher(CassandraDecoders.frameHeader)(_ => 9)
 
       val frameHeaders = Await.result(
         Source.single(bytes)
@@ -34,7 +35,7 @@ class StreamDetacherSpec extends FlatSpec with Matchers {
         1 second
       )
 
-      frameHeaders.head._1 should === (FrameHeader(-124, 0x00, 0, Opcode.Result, 11))
+      frameHeaders.head should === (Complete(FrameHeader(-124, 0x00, 0, Opcode.Result, 11), ByteString.empty))
     }
   }
 
@@ -43,7 +44,7 @@ class StreamDetacherSpec extends FlatSpec with Matchers {
     WithMaterializer { implicit materializer =>
       val bytes = ByteString(0x84, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x0b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b)
 
-      val flow = new StreamDetacher(CassandraDecoders.frameHeader)
+      val flow = new StreamDetacher(CassandraDecoders.frameHeader)(_.length + 9)
 
       val frameHeaders = Await.result(
         Source.repeat(bytes).take(count)
@@ -67,7 +68,7 @@ class StreamDetacherSpec extends FlatSpec with Matchers {
         ByteString(0x08, 0x09, 0x0a, 0x0b, 0x0c) // body chunk
       )
 
-      val flow = new StreamDetacher(CassandraDecoders.frameHeader)
+      val flow = new StreamDetacher(CassandraDecoders.frameHeader)(_.length + 9)
 
       val frameHeaders = Await.result(
         Source(bytes)
@@ -90,7 +91,7 @@ class StreamDetacherSpec extends FlatSpec with Matchers {
     WithMaterializer { implicit materializer =>
       val bytes = ByteString(0x84, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x0b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c)
 
-      val flow = new StreamDetacher(CassandraDecoders.frameHeader)
+      val flow = new StreamDetacher(CassandraDecoders.frameHeader)(_.length + 9)
 
       val frameHeaders = Await.result(
         Source.single(bytes)
@@ -110,25 +111,38 @@ class StreamDetacherSpec extends FlatSpec with Matchers {
   it should "detach on two levels" in {
     WithMaterializer { implicit materializer =>
       val bytes = immutable.Iterable(
-        ByteString(0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x04),
-        ByteString(0x05, 0x06)
+        ByteString(0x00, 0x00, 0x00, 0x01, 0x00, 0x00),
+        ByteString(0x00, 0x02, 0x00),
+        ByteString(0x00, 0x00, 0x03, 0x00, 0X00, 0x00, 0x04)
       )
 
       import CassandraDecoders._
 
-      val flow = new StreamDetacher(int(java.nio.ByteOrder.BIG_ENDIAN).more(_ => 7))
+      val flow = new StreamDetacher(int(java.nio.ByteOrder.BIG_ENDIAN))(_ => 8)
 
        val result = Await.result(Source(bytes)
         .via(flow)
-        .via(Flow[(Int, Source[ByteString, NotUsed])].mapAsync(1) { case (b, source) =>
-          println("IN level 1 " + b)
-          source
-            .via(new StreamDetacher(int(java.nio.ByteOrder.BIG_ENDIAN).more(_ => 3)))
-            .via(Flow[(Int, Source[ByteString, NotUsed])].mapAsync(1) { case (b2, source2) =>
-              println("IN level 2 " + b2)
-              source2.runWith(Sink.seq)
-            })
-            .runWith(Sink.seq)
+        .via(Flow[DetachResult[Int]].mapAsync(1) {
+          case Complete(level1, bytes) =>
+            println("Complete level 1 " + level1)
+            val Consumed(level2, _) = int(java.nio.ByteOrder.BIG_ENDIAN).decode(bytes)
+            println("Level 2 " + level2)
+            Future.successful(level1 -> level2)
+          case Partial(level1, source) =>
+            println("Partial level1 " + level1)
+            source
+              .via(new StreamDetacher(int(java.nio.ByteOrder.BIG_ENDIAN))(_ => 4))
+              .via(Flow[DetachResult[Int]].mapAsync(1) {
+                case Complete(level2, _) =>
+                  println("Complete level 2 " + level2)
+                  Future.successful(level1 -> level2)
+                case Partial(level2, source) =>
+                  println("Partial level 2 " + level2)
+                  source.runWith(Sink.ignore).map { _ =>
+                    (level1 -> level2)
+                  }
+              })
+              .runWith(Sink.seq)
         })
         .runWith(Sink.seq),
         2 second)

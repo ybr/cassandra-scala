@@ -9,7 +9,7 @@ trait CassandraTypesDecoders extends DefaultDecoders with BigEndian {
     bytes <- Decoder { bytes =>
       if(bytes.length >= size) {
         val (payload, remaining) = bytes.splitAt(size)
-        Consumed(payload, remaining, 0)
+        Consumed(payload, remaining)
       }
       else NotEnough
     }

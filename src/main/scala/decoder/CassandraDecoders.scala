@@ -7,13 +7,13 @@ import cassandra.protocol._
 object CassandraDecoders extends CassandraDecoders
 
 trait CassandraDecoders extends CassandraTypesDecoders {
-  val frameHeader = (for {
+  val frameHeader = for {
     version <- byte
     flags <- byte
     stream <- short
     opcode <- opcode
     length <- int
-  } yield FrameHeader(version, flags, stream, opcode, length)).more(_.length)
+  } yield FrameHeader(version, flags, stream, opcode, length)
 
   def frameBody(opcode: Opcode): Decoder[FrameBody] = opcode match {
     case Opcode.Error => error

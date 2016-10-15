@@ -10,11 +10,17 @@ import cassandra.decoder.{Consumed, Decoder, NotEnough}
 
 import scala.concurrent.duration._
 
-final class StreamDetacher[T](decoder: Decoder[T]) extends GraphStage[FlowShape[ByteString, (T, Source[ByteString, NotUsed])]] {
-  val in: Inlet[ByteString] = Inlet("StreamDetacher.in")
-  val out: Outlet[(T, Source[ByteString, NotUsed])] = Outlet("StreamDetacher.out")
+import utils._
 
-  override val shape: FlowShape[ByteString, (T, Source[ByteString, NotUsed])] = FlowShape(in, out)
+sealed trait DetachResult[T]
+case class Complete[T](entity: T, remaining: ByteString) extends DetachResult[T]
+case class Partial[T](entity: T, remaining: Source[ByteString, NotUsed]) extends DetachResult[T]
+
+final class StreamDetacher[T](decoder: Decoder[T])(expectedBytesCount: T => Int) extends GraphStage[FlowShape[ByteString, DetachResult[T]]] {
+  val in: Inlet[ByteString] = Inlet("StreamDetacher.in")
+  val out: Outlet[DetachResult[T]] = Outlet("StreamDetacher.out")
+
+  override val shape: FlowShape[ByteString, DetachResult[T]] = FlowShape(in, out)
 
   override def createLogic(inheritedAttributes: Attributes): GraphStageLogic = new TimerGraphStageLogic(shape) with OutHandler with InHandler {
     private var buffer: ByteString = ByteString.empty
@@ -28,7 +34,7 @@ final class StreamDetacher[T](decoder: Decoder[T]) extends GraphStage[FlowShape[
     }
 
     def feed() {
-      // println("StreamDetacher.feed maybeSubSource = " + maybeSubSource + ", buffer = " + buffer.length)
+      // println("StreamDetacher.feed maybeSubSource = " + maybeSubSource + ", buffer = " + buffer.length + ", moreBytesRequired = " + moreBytesRequired)
       maybeSubSource match {
         case Some(subSource) =>
           if(subSource.isAvailable) {
@@ -51,17 +57,28 @@ final class StreamDetacher[T](decoder: Decoder[T]) extends GraphStage[FlowShape[
           }
         case None =>
           decoder.decode(buffer) match {
-            case Consumed(t, remaining, requireMoreBytes) =>
-              val subSource = new SubSourceOutlet[ByteString]("SubSource")
-              subSource.setHandler(subSourceHandler(subSource))
+            case Consumed(t, remaining) =>
+              val requireMoreBytes = expectedBytesCount(t) - (buffer.length - remaining.length) // consumed bytes
+              // we have everything we need => Complete
+              // println(s"remaining ${remaining.length}, requireMoreBytes = ${requireMoreBytes}")
+              if(remaining.length >= requireMoreBytes) {
+                val (completeBytes, overCompleteBytes) = remaining.splitAt(requireMoreBytes)
+                push(out, Complete(t, completeBytes))
+                buffer = overCompleteBytes
+                moreBytesRequired = 0
+              }
+              else { // partially got the result
+                val subSource = new SubSourceOutlet[ByteString]("SubSource")
+                subSource.setHandler(subSourceHandler(subSource))
 
-              val subFromGraph = Source.fromGraph(subSource.source)
-              // println(s"StreamDetacher.push(out) : ${t}")
-              push(out, t -> subFromGraph)
+                val subFromGraph = Source.fromGraph(subSource.source)
+                // println(s"StreamDetacher.push(out) : ${t}")
+                push(out, Partial(t, subFromGraph))
 
-              maybeSubSource = Some(subSource)
-              buffer = remaining
-              moreBytesRequired = requireMoreBytes
+                maybeSubSource = Some(subSource)
+                buffer = remaining
+                moreBytesRequired = requireMoreBytes
+              }
             case NotEnough =>
               // upstream exhausted, we can't feed downstream any further
               if(isClosed(in)) completeStage()
