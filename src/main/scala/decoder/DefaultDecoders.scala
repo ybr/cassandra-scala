@@ -23,12 +23,21 @@ trait DefaultDecoders {
   def short(implicit byteOrder: ByteOrder) = scalar[Short](2)(_.getShort)
   def byte(implicit byteOrder: ByteOrder) = scalar[Byte](1)(_.getByte)
 
-  def list[A](size: Int)(A: Decoder[A]): Decoder[List[A]] = {
-    (0 until size).foldLeft(Decoder.point(List.empty[A])) { (AS, _) =>
-      for {
-        a <- A
-        as <- AS
-      } yield a :: as
+  def list[A](size: Int)(A: Decoder[A]) = Decoder[List[A]] { bytes =>
+    val decodedAS = (0 until size).foldLeft(DecoderResult.consumed(List.empty[A], bytes)) { (prev, _) =>
+      prev match {
+        case NotEnough => NotEnough
+        case Consumed(as, bytes) =>
+          A.decode(bytes) match {
+            case Consumed(a, remaining) => Consumed(a :: as, remaining)
+            case NotEnough => NotEnough
+          }
+      }
+    }
+
+    decodedAS match {
+      case Consumed(as, remaining) => Consumed(as.reverse, remaining)
+      case NotEnough => NotEnough
     }
   }
 
