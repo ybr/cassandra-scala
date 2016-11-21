@@ -31,3 +31,8 @@ object Decoder {
 sealed trait DecoderResult[+A]
 case class Consumed[A](value: A, remaining: ByteString) extends DecoderResult[A]
 case object NotEnough extends DecoderResult[Nothing]
+
+object DecoderResult {
+  def consumed[A](value: A, remaining: ByteString): DecoderResult[A] = Consumed(value, remaining)
+  val notEnough: DecoderResult[Nothing] = NotEnough
+}

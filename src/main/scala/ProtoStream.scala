@@ -12,7 +12,9 @@ import cassandra.decoder._
 import cassandra.protocol._
 import cassandra.streams._
 
-import java.net.InetSocketAddress
+import com.github.ybr.cassandra._
+
+import java.util.UUID
 
 import scala.concurrent._
 import scala.concurrent.ExecutionContext.Implicits._
@@ -25,11 +27,12 @@ object ProtoStream {
 
     implicit val materializer = ActorMaterializer.create(system)
 
-    val conn = new Connection(new InetSocketAddress("192.168.99.100", 32769))
+    val cluster = Cluster("192.168.99.100:32769")
+    implicit val session: Session = Await.result(cluster.connect("proto"), 1 second)
+
+    val start = System.currentTimeMillis
     val r1: Future[Unit] = for {
-      keyspace <- conn.connect("proto")
-      start = System.currentTimeMillis
-      _ <- loop(10000)(Dao.get1(conn, materializer))
+      _ <- loop(1)(Dao.get1(session, materializer))
       end = System.currentTimeMillis
       _ = println(s"Total: ${end - start}(ms)")
     } yield ()
@@ -51,162 +54,44 @@ object ProtoStream {
   def loop(n: Int)(f: => Future[Unit])(implicit ec: ExecutionContext): Future[Unit] = if(n == 0) Future.successful(()) else f.flatMap(_ => loop(n - 1)(f))
 }
 
-class Connection(remote: InetSocketAddress)(implicit system: ActorSystem) {
-  implicit val timeout = new Timeout(10 second)
-
-  implicit val materializer = ActorMaterializer.create(system)
-
-  val actorRef = system.actorOf(ConnectionActor.props(remote))
-
-  def connect(): Future[Unit] = for {
-    _ <- actorRef ? Request.startup
-  } yield ()
-
-  def connect(keyspace: String): Future[String] = for {
-    _ <- connect
-    result <- actorRef ? Request.query(s"USE ${keyspace}", One) map(_.asInstanceOf[DetachResult[(FrameHeader, FrameBody)]])
-    _ = println(result)
-  } yield {
-    val Complete((fh, fb), _) = result
-    val Result(_, SetKeyspace(ks)) = fb
-    ks
-  }
-
-  def options(): Future[Map[String, List[String]]] = {
-    for {
-      result <- actorRef ? Request.options map(_.asInstanceOf[DetachResult[(FrameHeader, FrameBody)]])
-      body <- result match {
-        case Complete(_ , body) => Future.successful(body)
-        case Partial(_, source) => source.toMat(Sink.fold(ByteString.empty)(_ ++ _))(Keep.right).run
-      }
-    } yield CassandraDecoders.multimap.decode(body) match {
-      case Consumed(multimap, _) => multimap
-    }
-  }
-
-  val detacher  = Flow.fromGraph(new StreamDetacher(CassandraDecoders.int)(identity))
-                  .map {
-                    case Partial(_, source) => Column(source)
-                    case Complete(_, bytes) => Column(Source.single(bytes))
-                  }
-
-  def stream(query: String, cl: ConsistencyLevel): Future[(FrameHeader, FrameBody, Source[Column, NotUsed])] = for {
-    frame <- actorRef ? Request.query(query, cl) map(_.asInstanceOf[DetachResult[(FrameHeader, FrameBody)]])
-  } yield frame match {
-    case Complete((fh, fb), bytes) =>
-      val rowsHeader = fb.asInstanceOf[Result].header.asInstanceOf[Rows]
-      val Consumed(columns, _) = CassandraDecoders.list(rowsHeader.rowsCount * rowsHeader.columnsCount)(CassandraDecoders.bytes.map(bytes => Column(Source.single(bytes)))).decode(bytes)
-      (fh, fb, Source(columns))
-
-    case Partial((fh, fb), source) =>
-      (fh, fb, source.via(detacher))
-  }
-
-  def stream1(query: String, cl: ConsistencyLevel): Future[(FrameHeader, FrameBody, Source[ByteString, NotUsed])] = {
-    for {
-      result <- actorRef ? Request.query(query, cl) map(_.asInstanceOf[DetachResult[(FrameHeader, FrameBody)]])
-    } yield result match {
-      case Complete((fh, fb), bytes) => (fh, fb, Source.single(bytes))
-      case Partial((fh, fb), source) => (fh, fb, source)
-    }
-  }
-}
-
-class ConnectionActor(remote: InetSocketAddress)(implicit system: ActorSystem) extends Actor {
-  implicit val materializer = ActorMaterializer.create(system)
-
-  var listenerRef: Option[ActorRef] = None
-
-  val notifyListener = Flow[DetachResult[(FrameHeader, FrameBody)]].map { f =>
-    self ! f
-    f
-  }
-
-  val runnable = Source.actorRef(1, OverflowStrategy.fail) // here might be here why it fails
-                  .via(
-                    Fusing.aggressive(
-                      // FrameBodyBidi.framing
-                      // .atop(
-                        FrameHeaderBidi.framing
-                        // )
-                      // .atop(BenchBidi.dump)
-                      // dump IO
-                      // .atop(TcpDumpBidi.dump)
-                      // .atop(BenchBidi.dump)
-                      // buffer IO
-                      // .atop(BidiFlow.fromFlows(
-                      //   Flow[ByteString].buffer(10, OverflowStrategy.backpressure),
-                      //   Flow[ByteString].buffer(10, OverflowStrategy.backpressure)
-                      // ))
-                      .join(Tcp().outgoingConnection(remote))
-                  ))
-                  .via(notifyListener)
-                  .to(Sink.ignore)
-  val tcpActor: ActorRef = runnable.run()
-
-  def receive = {
-    case frame @ (FrameHeader(version, _, _, _, _), source) if version == 0x04 => // request
-      listenerRef = Some(sender)
-      tcpActor ! frame
-
-    case frame @ Complete((fh, fb), bytes)  =>
-      // println("Complete")
-      listenerRef.foreach(_ ! frame)
-      listenerRef = None
-
-    case frame @ Partial((fh, fb), bytes)  =>
-      println("Partial " + fh)
-      listenerRef.foreach(_ ! frame)
-      listenerRef = None
-
-    case unhandled =>
-      println("Unhandled " + unhandled)
-      listenerRef.foreach(_ ! Status.Failure(new IllegalArgumentException("Not handled")))
-      listenerRef = None
-  }
-}
-
-object ConnectionActor {
-  def props(remote: InetSocketAddress)(implicit system: ActorSystem) = Props(classOf[ConnectionActor], remote, system)
-}
-
 object Dao {
-  def get(implicit conn: Connection, mat: Materializer): Future[Unit] = {
-    val start = System.currentTimeMillis
-    var firstOctetTimeMS = 0L
-    val r = for {
-      (fh, fb, columns) <- conn.stream("SELECT values FROM one LIMIT 1", One)
-      // (fh, fb, columns) <- conn.stream("SELECT data FROM test LIMIT 1", One)
-      // (fh, fb, columns) <- conn.stream("SELECT data FROM test LIMIT 300000", One)
-      rows = columns.via(Flow.fromGraph(new Grouped[Column](fb.asInstanceOf[Result].header.asInstanceOf[Rows].columnsCount))).map(Row(_))
-    } yield ResultSource(rows)
-
-    r.flatMap { result =>
-      // println("RESULT")
-      result.rows.mapAsync(1) { row =>
-        // println("ROW")
-        row.columns.mapAsync(1) { column =>
-          // println("\tCOLUMN")
-          column.content.mapAsync(1) { bs =>
-            // println("\t\tBYTES " + bs)
-            if(firstOctetTimeMS == 0) firstOctetTimeMS = System.currentTimeMillis
-            Future.successful(bs)
-          }
-          .runWith(Sink.seq)
-        }
-        .runWith(Sink.seq)
-      }
-      .runWith(Sink.seq)
-    }.map(_ => ())
+  def get()(implicit session: Session): Future[Unit] = {
+    for {
+      rs <- session.execute(One)("SELECT * FROM test LIMIT 1")
+    } yield println(rs.columnDefinitions())
   }
 
-  def get1(implicit conn: Connection, mat: Materializer): Future[Unit] = {
+  def get1(implicit session: Session, mat: Materializer): Future[Unit] = {
     for {
-      (fh, fb, source) <- conn.stream1("SELECT data FROM test LIMIT 1", One)
-      // (fh, fb, source) <- conn.stream1("SELECT values FROM one LIMIT 1", One)
-      // (fh, fb, source) <- conn.stream1("SELECT data FROM test LIMIT 300000", One)
+      // resultSource <- session.execute(One)("SELECT * FROM test LIMIT 1")
+      // resultSource <- session.execute(One)("SELECT * FROM test LIMIT 300000")
+      resultSource <- session.execute(One)(
+        "SELECT * FROM test WHERE job_id = ? LIMIT 10",
+        UUID.fromString("42b5a396-9c28-4f84-85b4-e49a088ed29e")
+      )
+      // 42b5a396-9c28-4f84-85b4-e49a088ed29e
+      // a3ffefd1-609b-48ec-a646-c28626744554
       // _ = println("Signet 1")
-      bytes <- source.runWith(Sink.seq)
-    } yield () //println("Signet 2")
+      // start = System.currentTimeMillis()
+      // bs <- resultSource.columns
+      //         .flatMapConcat(_.content)
+      //         .runFold(ByteString.empty) { (a1, a2) =>
+      //           val end = System.currentTimeMillis()
+      //           println(s"Bytes received after ${end-start}(ms)")
+      //           a1 ++ a2
+      //         }
+      uuids <- resultSource.all().map { row =>
+        // row.map { r =>
+        //   val bytes = r.blob("values").get
+        //   println(bytes.length)
+        // }
+        row.map(_.uuid("job_id").get)
+      }
+    } yield {
+      if(resultSource.ok())
+        println(uuids.toList)
+        // println("END " + bs.length)
+      else println(resultSource.errorMessage())
+    }
   }
 }

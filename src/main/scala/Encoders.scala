@@ -2,6 +2,8 @@ package cassandra
 
 import cassandra.protocol._
 
+import com.github.ybr.cassandra._
+
 import akka.util.{ByteString, ByteStringBuilder}
 import java.nio.ByteOrder
 
@@ -70,6 +72,7 @@ trait BodyEncoders extends EncoderOps with BigEndian {
   implicit val byteEncoder = Encoder[Byte](byte => ByteString(byte))
   implicit val shortEncoder = Encoder[Short](short => new ByteStringBuilder().putShort(short).result())
   implicit val intEncoder = Encoder[Int](int => new ByteStringBuilder().putInt(int).result())
+  implicit val longEncoder = Encoder[Long](long => new ByteStringBuilder().putLong(long).result())
 
   implicit val bytesEncoder = Encoder[List[Byte]] { bytes =>
     new ByteStringBuilder()

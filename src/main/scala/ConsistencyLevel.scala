@@ -1,4 +1,4 @@
-package cassandra
+package com.github.ybr.cassandra
 
 sealed trait ConsistencyLevel
 object Any extends ConsistencyLevel

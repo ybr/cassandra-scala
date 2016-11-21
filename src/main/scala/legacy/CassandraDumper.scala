@@ -46,7 +46,7 @@ object CassandraExtractor {
 
     val start = System.currentTimeMillis
 
-    (0 to 10000).foreach(_ => get(session))
+    (0 to 1).foreach(_ => get(session))
 
     val end = System.currentTimeMillis
 
@@ -60,9 +60,9 @@ object CassandraExtractor {
 
   def get(session: Session) {
     val start = System.currentTimeMillis
-    // val rs = session.execute("SELECT values FROM one LIMIT 10")
+    val rs = session.execute("SELECT values FROM one LIMIT 1")
     // val rs = session.execute("SELECT data FROM test LIMIT 300000")
-    val rs = session.execute("SELECT data FROM test LIMIT 1")
+    // val rs = session.execute("SELECT data FROM test LIMIT 1")
     val rows = rs.all()
     val buffer = rows.get(0).getBytes(0)
     val end = System.currentTimeMillis

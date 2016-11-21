@@ -30,3 +30,5 @@ trait CassandraTypesDecoders extends DefaultDecoders with BigEndian {
     multilist <- list(size)(tuple(string, strings))
   } yield multilist.toMap
 }
+
+object CassandraTypesDecoders extends CassandraTypesDecoders
